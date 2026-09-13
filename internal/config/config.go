@@ -13,6 +13,8 @@ type Config struct {
 	DatabaseURI          string `env:"DATABASE_URI"`
 	AccrualSystemAddress string `env:"ACCRUAL_SYSTEM_ADDRESS"`
 	LogLevel             string `env:"LOG_LEVEL" envDefault:"DEBUG"`
+	JWTSecret            string `env:"JWT_SECRET" envDefault:"supersecretkey"`
+	MaxBodySize          int    `env:"MAX_BODY_SIZE" envDefault:"2048"`
 }
 
 // GetConfig обрабатывает аргументы командной строки и переменные окружения,
