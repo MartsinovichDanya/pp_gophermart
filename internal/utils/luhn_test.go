@@ -12,7 +12,7 @@ func TestLuhn_ValidNumbers(t *testing.T) {
 		"12345678903",
 		"9278923470",
 		"2377225624",
-		"12345678901234567890",
+		"79927398713", // классический пример валидного номера Луна
 	}
 
 	for _, number := range validNumbers {
@@ -27,8 +27,8 @@ func TestLuhn_InvalidNumbers(t *testing.T) {
 	invalidNumbers := []string{
 		"1234567890",
 		"12345678901",
-		"0000000000",
 		"12345678904",
+		"12345678901234567890", // не проходит алгоритм Луна
 	}
 
 	for _, number := range invalidNumbers {
