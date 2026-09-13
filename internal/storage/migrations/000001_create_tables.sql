@@ -1,4 +1,5 @@
 -- +goose Up
+CREATE SCHEMA IF NOT EXISTS service_data;
 CREATE TABLE IF NOT EXISTS service_data.users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     login VARCHAR(255) NOT NULL UNIQUE,
@@ -34,3 +35,4 @@ CREATE INDEX IF NOT EXISTS idx_withdrawals_user_id ON service_data.withdrawals(u
 DROP TABLE IF EXISTS service_data.users;
 DROP TABLE IF EXISTS service_data.orders;
 DROP TABLE IF EXISTS service_data.withdrawals;
+DROP SCHEMA service_data;
