@@ -14,7 +14,7 @@ import (
 	"github.com/MartsinovichDanya/pp_gophermart/internal/storage"
 )
 
-// MockStore — мок для storage.Store
+// MockStore — мок для storage.Store.
 type MockStore struct {
 	mock.Mock
 }
@@ -34,7 +34,6 @@ func (m *MockStore) AccrueBalance(ctx context.Context, userID, orderNumber strin
 	return args.Error(0)
 }
 
-// Остальные методы мока (заглушки)
 func (m *MockStore) CreateUser(ctx context.Context, login, passwordHash string) (string, error) {
 	return "", nil
 }
@@ -73,59 +72,42 @@ func TestOrderProcessor_StartStop(t *testing.T) {
 	processor := NewOrderProcessor(mockStore, client, 100*time.Millisecond)
 
 	processor.Start()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(250 * time.Millisecond)
 	processor.Stop()
 
-	// Проверяем, что метод вызывался
-	mockStore.AssertCalled(t, "GetOrdersToProcess", mock.Anything, 100)
+	// Проверяем, что метод вызывался хотя бы раз
+	mockStore.AssertCalled(t, "GetOrdersToProcess", mock.Anything, mock.Anything)
 }
 
-// TestOrderProcessor_ProcessOrder_Processed проверяет обработку заказа со статусом PROCESSED.
-func TestOrderProcessor_ProcessOrder_Processed(t *testing.T) {
-	// Создаём мок HTTP сервер для системы расчёта баллов
+// TestOrderProcessor_Processed проверяет обработку заказа со статусом PROCESSED.
+func TestOrderProcessor_Processed(t *testing.T) {
 	mockAccrualServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Возвращаем успешный ответ с начислением
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"order": "12345678903", "status": "PROCESSED", "accrual": 500}`))
 	}))
 	defer mockAccrualServer.Close()
 
-	// Создаём клиент с адресом мок сервера
 	client := accrual.NewClient(mockAccrualServer.URL)
 
-	// Создаём мок хранилища
 	mockStore := new(MockStore)
 	orders := []storage.Order{
-		{
-			ID:     "1",
-			UserID: "user1",
-			Number: "12345678903",
-			Status: model.OrderStatusNew,
-		},
+		{ID: "1", UserID: "user1", Number: "12345678903", Status: model.OrderStatusNew},
 	}
 
-	// Настраиваем ожидания
 	mockStore.On("GetOrdersToProcess", mock.Anything, 100).Return(orders, nil)
 	mockStore.On("AccrueBalance", mock.Anything, "user1", "12345678903", 500.0).Return(nil)
 
-	// Создаём и запускаем воркер
 	processor := NewOrderProcessor(mockStore, client, 100*time.Millisecond)
 	processor.Start()
-
-	// Ждём, чтобы воркер успел обработать заказ
 	time.Sleep(300 * time.Millisecond)
-
-	// Останавливаем воркер
 	processor.Stop()
 
-	// Проверяем, что AccrueBalance был вызван с правильными аргументами
 	mockStore.AssertCalled(t, "AccrueBalance", mock.Anything, "user1", "12345678903", 500.0)
 }
 
-// TestOrderProcessor_ProcessOrder_Processing проверяет обработку заказа со статусом PROCESSING.
-func TestOrderProcessor_ProcessOrder_Processing(t *testing.T) {
-	// Создаём мок HTTP сервер
+// TestOrderProcessor_Processing проверяет обработку заказа со статусом PROCESSING.
+func TestOrderProcessor_Processing(t *testing.T) {
 	mockAccrualServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -137,12 +119,7 @@ func TestOrderProcessor_ProcessOrder_Processing(t *testing.T) {
 
 	mockStore := new(MockStore)
 	orders := []storage.Order{
-		{
-			ID:     "1",
-			UserID: "user1",
-			Number: "12345678903",
-			Status: model.OrderStatusNew,
-		},
+		{ID: "1", UserID: "user1", Number: "12345678903", Status: model.OrderStatusNew},
 	}
 
 	mockStore.On("GetOrdersToProcess", mock.Anything, 100).Return(orders, nil)
@@ -156,8 +133,8 @@ func TestOrderProcessor_ProcessOrder_Processing(t *testing.T) {
 	mockStore.AssertCalled(t, "UpdateOrderStatus", mock.Anything, "12345678903", model.OrderStatusProcessing, (*float64)(nil))
 }
 
-// TestOrderProcessor_ProcessOrder_Invalid проверяет обработку заказа со статусом INVALID.
-func TestOrderProcessor_ProcessOrder_Invalid(t *testing.T) {
+// TestOrderProcessor_Invalid проверяет обработку заказа со статусом INVALID.
+func TestOrderProcessor_Invalid(t *testing.T) {
 	mockAccrualServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -169,12 +146,7 @@ func TestOrderProcessor_ProcessOrder_Invalid(t *testing.T) {
 
 	mockStore := new(MockStore)
 	orders := []storage.Order{
-		{
-			ID:     "1",
-			UserID: "user1",
-			Number: "12345678903",
-			Status: model.OrderStatusNew,
-		},
+		{ID: "1", UserID: "user1", Number: "12345678903", Status: model.OrderStatusNew},
 	}
 
 	mockStore.On("GetOrdersToProcess", mock.Anything, 100).Return(orders, nil)

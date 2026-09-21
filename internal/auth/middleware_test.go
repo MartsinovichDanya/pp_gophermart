@@ -17,18 +17,18 @@ func TestAuthMiddleware_ValidCookie(t *testing.T) {
 	token, err := NewJWT(userID, secret)
 	require.NoError(t, err)
 
-	handler := AuthMiddleware(secret)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := AuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
 		id, ok := GetUserIDFromContext(r.Context())
 		assert.True(t, ok)
 		assert.Equal(t, userID, id)
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: "token", Value: token})
 	w := httptest.NewRecorder()
 
-	handler.ServeHTTP(w, req)
+	handler(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -40,18 +40,18 @@ func TestAuthMiddleware_ValidHeader(t *testing.T) {
 	token, err := NewJWT(userID, secret)
 	require.NoError(t, err)
 
-	handler := AuthMiddleware(secret)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := AuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
 		id, ok := GetUserIDFromContext(r.Context())
 		assert.True(t, ok)
 		assert.Equal(t, userID, id)
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 
-	handler.ServeHTTP(w, req)
+	handler(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -59,14 +59,14 @@ func TestAuthMiddleware_ValidHeader(t *testing.T) {
 func TestAuthMiddleware_NoToken(t *testing.T) {
 	secret := "test-secret"
 
-	handler := AuthMiddleware(secret)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := AuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 
-	handler.ServeHTTP(w, req)
+	handler(w, req)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
@@ -74,14 +74,14 @@ func TestAuthMiddleware_NoToken(t *testing.T) {
 func TestAuthMiddleware_InvalidToken(t *testing.T) {
 	secret := "test-secret"
 
-	handler := AuthMiddleware(secret)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := AuthMiddleware(secret, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	}))
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: "token", Value: "invalid-token"})
 	w := httptest.NewRecorder()
 
-	handler.ServeHTTP(w, req)
+	handler(w, req)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }

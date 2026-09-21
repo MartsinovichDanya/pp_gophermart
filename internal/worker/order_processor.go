@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/MartsinovichDanya/pp_gophermart/internal/accrual"
 	"github.com/MartsinovichDanya/pp_gophermart/internal/logger"
@@ -21,20 +22,23 @@ type OrderProcessor struct {
 	store         storage.Store
 	accrualClient *accrual.Client
 	interval      time.Duration
-	stopCh        chan struct{}
+	ctx           context.Context
+	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 }
 
 // NewOrderProcessor создаёт новый воркер обработки заказов.
 // store — хранилище для работы с заказами
 // accrualClient — клиент системы расчёта баллов
-// interval — интервал между циклами обработки (рекомендуется 5-10 секунд)
+// interval — интервал между циклами обработки
 func NewOrderProcessor(store storage.Store, accrualClient *accrual.Client, interval time.Duration) *OrderProcessor {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &OrderProcessor{
 		store:         store,
 		accrualClient: accrualClient,
 		interval:      interval,
-		stopCh:        make(chan struct{}),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
@@ -45,11 +49,11 @@ func (op *OrderProcessor) Start() {
 	logger.Log.Info("Воркер обработки заказов запущен", zap.Duration("interval", op.interval))
 }
 
-// Stop корректно останавливает воркер (graceful shutdown).
-// Ждёт завершения текущего цикла обработки.
+// Stop отменяет контекст воркера и ждёт завершения всех операций.
+// Все запросы к БД и внешней системе будут отменены через контекст.
 func (op *OrderProcessor) Stop() {
 	logger.Log.Info("Остановка воркера обработки заказов...")
-	close(op.stopCh)
+	op.cancel()
 	op.wg.Wait()
 	logger.Log.Info("Воркер обработки заказов остановлен")
 }
@@ -63,7 +67,7 @@ func (op *OrderProcessor) run() {
 
 	for {
 		select {
-		case <-op.stopCh:
+		case <-op.ctx.Done():
 			logger.Log.Debug("Получен сигнал остановки воркера")
 			return
 		case <-ticker.C:
@@ -72,13 +76,13 @@ func (op *OrderProcessor) run() {
 	}
 }
 
-// processOrders обрабатывает все заказы в статусах NEW и PROCESSING.
+// processOrders обрабатывает все заказы в статусах NEW и PROCESSING параллельно.
 func (op *OrderProcessor) processOrders() {
-	ctx := context.Background()
-
-	// Получаем заказы для обработки (лимит 100 за раз)
-	orders, err := op.store.GetOrdersToProcess(ctx, 100)
+	orders, err := op.store.GetOrdersToProcess(op.ctx, 100)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		logger.Log.Error("Ошибка получения заказов для обработки", zap.Error(err))
 		return
 	}
@@ -90,20 +94,21 @@ func (op *OrderProcessor) processOrders() {
 
 	logger.Log.Info("Начата обработка заказов", zap.Int("count", len(orders)))
 
-	// Обрабатываем каждый заказ
+	g, gCtx := errgroup.WithContext(op.ctx)
+	g.SetLimit(10)
+
 	for _, order := range orders {
-		// Проверяем, не нужно ли остановиться
-		select {
-		case <-op.stopCh:
-			logger.Log.Debug("Остановка воркера во время обработки заказов")
-			return
-		default:
+		order := order
+		g.Go(func() error {
+			op.processOrder(gCtx, order)
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			logger.Log.Error("Ошибка обработки заказов", zap.Error(err))
 		}
-
-		op.processOrder(ctx, order)
-
-		// Небольшая пауза между запросами, чтобы не перегружать внешнюю систему
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -114,40 +119,34 @@ func (op *OrderProcessor) processOrder(ctx context.Context, order storage.Order)
 		zap.String("status", string(order.Status)),
 	)
 
-	// Запрашиваем информацию у системы расчёта баллов
 	response, err := op.accrualClient.CheckOrder(ctx, order.Number)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		if errors.Is(err, accrual.ErrOrderNotFound) {
-			// Заказ не найден во внешней системе — помечаем как INVALID
 			logger.Log.Debug("Заказ не найден в системе расчёта", zap.String("order", order.Number))
 			if err := op.store.UpdateOrderStatus(ctx, order.Number, model.OrderStatusInvalid, nil); err != nil {
 				logger.Log.Error("Ошибка обновления статуса заказа", zap.Error(err), zap.String("order", order.Number))
 			}
 			return
 		}
-
 		if errors.Is(err, accrual.ErrRateLimited) {
-			// Превышен лимит запросов — пропускаем и попробуем в следующем цикле
 			logger.Log.Warn("Превышен лимит запросов, пропускаем заказ", zap.String("order", order.Number))
 			return
 		}
-
-		// Другие ошибки — логируем и пропускаем
 		logger.Log.Error("Ошибка запроса к системе расчёта", zap.Error(err), zap.String("order", order.Number))
 		return
 	}
 
-	// Обрабатываем ответ в зависимости от статуса
 	switch response.Status {
 	case model.AccrualStatusRegistered, model.AccrualStatusProcessing:
-		// Заказ ещё обрабатывается — обновляем статус на PROCESSING
 		logger.Log.Debug("Заказ в процессе обработки", zap.String("order", order.Number))
 		if err := op.store.UpdateOrderStatus(ctx, order.Number, model.OrderStatusProcessing, nil); err != nil {
 			logger.Log.Error("Ошибка обновления статуса заказа", zap.Error(err), zap.String("order", order.Number))
 		}
 
 	case model.AccrualStatusProcessed:
-		// Расчёт завершён — начисляем баллы
 		if response.Accrual != nil && *response.Accrual > 0 {
 			logger.Log.Info("Начисление баллов",
 				zap.String("order", order.Number),
@@ -157,7 +156,6 @@ func (op *OrderProcessor) processOrder(ctx context.Context, order storage.Order)
 				logger.Log.Error("Ошибка начисления баллов", zap.Error(err), zap.String("order", order.Number))
 			}
 		} else {
-			// Расчёт завершён, но начислений нет — помечаем как PROCESSED без баллов
 			logger.Log.Debug("Заказ обработан без начислений", zap.String("order", order.Number))
 			if err := op.store.UpdateOrderStatus(ctx, order.Number, model.OrderStatusProcessed, nil); err != nil {
 				logger.Log.Error("Ошибка обновления статуса заказа", zap.Error(err), zap.String("order", order.Number))
@@ -165,7 +163,6 @@ func (op *OrderProcessor) processOrder(ctx context.Context, order storage.Order)
 		}
 
 	case model.AccrualStatusInvalid:
-		// Заказ не принят к расчёту — помечаем как INVALID
 		logger.Log.Debug("Заказ не принят к расчёту", zap.String("order", order.Number))
 		if err := op.store.UpdateOrderStatus(ctx, order.Number, model.OrderStatusInvalid, nil); err != nil {
 			logger.Log.Error("Ошибка обновления статуса заказа", zap.Error(err), zap.String("order", order.Number))

@@ -16,13 +16,10 @@ import (
 	"github.com/MartsinovichDanya/pp_gophermart/internal/middleware"
 	"github.com/MartsinovichDanya/pp_gophermart/internal/storage"
 	"github.com/MartsinovichDanya/pp_gophermart/internal/worker"
-	"github.com/go-chi/chi/v5"
-	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 )
 
 // Run инициализирует все зависимости, настраивает роутер и запускает HTTP-сервер.
-// Поддерживает graceful shutdown при получении сигналов SIGINT или SIGTERM.
 func Run() error {
 	cfg := config.GetConfig()
 
@@ -52,46 +49,42 @@ func Run() error {
 	// Инициализация handler
 	h := handler.NewHandler(store, cfg.JWTSecret, cfg.MaxBodySize)
 
-	// Инициализация роутера
-	r := chi.NewRouter()
-	r.Use(chiMiddleware.RequestID)
-	r.Use(logger.GetLogger())
-	r.Use(middleware.GzipMiddleware)
-	r.Use(chiMiddleware.Recoverer)
+	// Роутер на стандартном ServeMux (Go 1.22+)
+	mux := http.NewServeMux()
 
-	// Публичные маршруты (без авторизации)
-	r.Post("/api/user/register", h.RegisterHandler)
-	r.Post("/api/user/login", h.LoginHandler)
+	// Публичные маршруты
+	mux.HandleFunc("POST /api/user/register", h.RegisterHandler)
+	mux.HandleFunc("POST /api/user/login", h.LoginHandler)
 
-	// Защищённые маршруты (требуют авторизации)
-	r.Group(func(r chi.Router) {
-		r.Use(auth.AuthMiddleware(cfg.JWTSecret))
+	// Защищённые маршруты
+	mux.HandleFunc("POST /api/user/orders", auth.AuthMiddleware(cfg.JWTSecret, h.UploadOrderHandler))
+	mux.HandleFunc("GET /api/user/orders", auth.AuthMiddleware(cfg.JWTSecret, h.GetOrdersHandler))
+	mux.HandleFunc("GET /api/user/balance", auth.AuthMiddleware(cfg.JWTSecret, h.GetBalanceHandler))
+	mux.HandleFunc("POST /api/user/balance/withdraw", auth.AuthMiddleware(cfg.JWTSecret, h.WithdrawHandler))
+	mux.HandleFunc("GET /api/user/withdrawals", auth.AuthMiddleware(cfg.JWTSecret, h.GetWithdrawalsHandler))
 
-		// Заказы
-		r.Post("/api/user/orders", h.UploadOrderHandler)
-		r.Get("/api/user/orders", h.GetOrdersHandler)
-
-		// Баланс
-		r.Get("/api/user/balance", h.GetBalanceHandler)
-		r.Post("/api/user/balance/withdraw", h.WithdrawHandler)
-
-		// Выводы
-		r.Get("/api/user/withdrawals", h.GetWithdrawalsHandler)
-	})
-
-	// Health-check эндпоинт
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+	// Health-check ({$} — точное совпадение /)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Gophermart is running"))
 	})
 
-	// Создаём HTTP сервер
+	// Цепочка middleware: recover → logger → gzip → mux
+	var srvHandler http.Handler = mux
+	srvHandler = middleware.GzipMiddleware(srvHandler)
+	srvHandler = logger.GetLogger()(srvHandler)
+	srvHandler = middleware.RecoverMiddleware(srvHandler)
+
 	srv := &http.Server{
-		Addr:    cfg.RunAddress,
-		Handler: r,
+		Addr:              cfg.RunAddress,
+		Handler:           srvHandler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
-	// Запуск воркера обработки заказов (если настроен адрес системы расчёта)
+	// Запуск воркера
 	var orderProcessor *worker.OrderProcessor
 	if accrualClient != nil {
 		orderProcessor = worker.NewOrderProcessor(store, accrualClient, cfg.ProcessingInterval)
@@ -102,7 +95,6 @@ func Run() error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	// Запуск сервера в горутине
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Log.Info("Starting server", zap.String("address", cfg.RunAddress))
@@ -111,7 +103,6 @@ func Run() error {
 		}
 	}()
 
-	// Ожидаем сигнал остановки или ошибку сервера
 	select {
 	case err := <-errCh:
 		logger.Log.Error("Server error", zap.Error(err))
@@ -124,18 +115,12 @@ func Run() error {
 	}
 
 	// Graceful shutdown
-	logger.Log.Info("Shutting down server...")
-
-	// Создаём контекст с таймаутом для graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Останавливаем воркер
 	if orderProcessor != nil {
 		orderProcessor.Stop()
 	}
-
-	// Останавливаем HTTP сервер
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Log.Error("Server shutdown error", zap.Error(err))
 		return err

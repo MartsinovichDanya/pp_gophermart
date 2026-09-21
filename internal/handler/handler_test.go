@@ -18,7 +18,7 @@ import (
 	"github.com/MartsinovichDanya/pp_gophermart/internal/storage"
 )
 
-// MockStore — мок для storage.Store
+// MockStore — мок для storage.Store.
 type MockStore struct {
 	mock.Mock
 }
@@ -113,7 +113,7 @@ func TestRegisterHandler_Success(t *testing.T) {
 	h.RegisterHandler(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	// Проверяем, что cookie установлен
+
 	cookies := w.Result().Cookies()
 	found := false
 	for _, c := range cookies {

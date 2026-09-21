@@ -7,13 +7,13 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/MartsinovichDanya/pp_gophermart/internal/logger"
+	"github.com/MartsinovichDanya/pp_gophermart/internal/model"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
-
-	"github.com/MartsinovichDanya/pp_gophermart/internal/logger"
-	"github.com/MartsinovichDanya/pp_gophermart/internal/model"
 )
 
 //go:embed migrations/*.sql
@@ -64,7 +64,6 @@ func (s *PostgresStore) CreateUser(ctx context.Context, login, passwordHash stri
 	).Scan(&userID)
 
 	if err != nil {
-		// Проверяем ошибку уникальности
 		if isUniqueViolation(err) {
 			return "", ErrUserAlreadyExists
 		}
@@ -109,32 +108,37 @@ func (s *PostgresStore) GetBalance(ctx context.Context, userID string) (float64,
 
 // CreateOrder создаёт новый заказ для пользователя.
 func (s *PostgresStore) CreateOrder(ctx context.Context, userID, orderNumber string) error {
-	var existingUserID string
-	err := s.pool.QueryRow(ctx,
-		`SELECT user_id FROM service_data.orders WHERE number = $1`,
-		orderNumber,
-	).Scan(&existingUserID)
-
-	if err == nil {
-		// Заказ уже существует
-		if existingUserID == userID {
-			return ErrOrderOwnedByUser
-		}
-		return ErrOrderAlreadyExists
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("ошибка проверки заказа: %w", err)
-	}
-
-	// Создаём новый заказ
-	_, err = s.pool.Exec(ctx,
-		`INSERT INTO service_data.orders (user_id, number, status) VALUES ($1, $2, $3)`,
+	// Атомарная вставка: если номер уже есть — ничего не делаем
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO service_data.orders (user_id, number, status)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (number) DO NOTHING`,
 		userID, orderNumber, model.OrderStatusNew,
 	)
 	if err != nil {
 		return fmt.Errorf("ошибка создания заказа: %w", err)
 	}
-	return nil
+
+	// RowsAffected == 1 — заказ успешно создан
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	// RowsAffected == 0 — конфликт, номер уже существует. Определяем владельца.
+	var existingUserID string
+	err = s.pool.QueryRow(ctx,
+		`SELECT user_id FROM service_data.orders WHERE number = $1`,
+		orderNumber,
+	).Scan(&existingUserID)
+
+	if err != nil {
+		return ErrOrderAlreadyExists
+	}
+
+	if existingUserID == userID {
+		return ErrOrderOwnedByUser
+	}
+	return ErrOrderAlreadyExists
 }
 
 // GetOrderByNumber возвращает заказ по номеру.
@@ -224,7 +228,6 @@ func (s *PostgresStore) AccrueBalance(ctx context.Context, userID, orderNumber s
 	}
 	defer tx.Rollback(ctx)
 
-	// Обновляем статус заказа
 	_, err = tx.Exec(ctx,
 		`UPDATE service_data.orders SET status = $1, accrual = $2 WHERE number = $3 AND user_id = $4`,
 		model.OrderStatusProcessed, accrual, orderNumber, userID,
@@ -233,7 +236,6 @@ func (s *PostgresStore) AccrueBalance(ctx context.Context, userID, orderNumber s
 		return fmt.Errorf("ошибка обновления заказа: %w", err)
 	}
 
-	// Начисляем баллы на счёт
 	_, err = tx.Exec(ctx,
 		`UPDATE service_data.users SET balance = balance + $1 WHERE id = $2`,
 		accrual, userID,
@@ -253,7 +255,6 @@ func (s *PostgresStore) WithdrawBalance(ctx context.Context, userID, orderNumber
 	}
 	defer tx.Rollback(ctx)
 
-	// Проверяем баланс и списываем атомарно
 	var newBalance float64
 	err = tx.QueryRow(ctx,
 		`UPDATE service_data.users 
@@ -270,7 +271,6 @@ func (s *PostgresStore) WithdrawBalance(ctx context.Context, userID, orderNumber
 		return fmt.Errorf("ошибка списания: %w", err)
 	}
 
-	// Создаём запись о выводе
 	_, err = tx.Exec(ctx,
 		`INSERT INTO service_data.withdrawals (user_id, order_number, sum) VALUES ($1, $2, $3)`,
 		userID, orderNumber, sum,
@@ -316,23 +316,12 @@ func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
 
-// isUniqueViolation проверяет, является ли ошибкой нарушения уникальности.
+// isUniqueViolation проверяет, является ли ошибкой нарушения уникальности PostgreSQL.
+// Использует pgconn.PgError для надёжной проверки по коду ошибки "23505".
 func isUniqueViolation(err error) bool {
-	// pgx возвращает ошибки с кодом 23505 для unique violation
-	return err != nil && (err.Error() == "ERROR: duplicate key value violates unique constraint (SQLSTATE 23505)" ||
-		contains(err.Error(), "23505"))
-}
-
-// contains проверяет наличие подстроки.
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
 	}
 	return false
 }

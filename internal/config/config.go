@@ -10,7 +10,7 @@ import (
 
 // Config содержит настройки приложения.
 type Config struct {
-	RunAddress           string        `env:"RUN_ADDRESS" envDefault:"localhost:8080"`
+	RunAddress           string        `env:"RUN_ADDRESS"`
 	DatabaseURI          string        `env:"DATABASE_URI"`
 	AccrualSystemAddress string        `env:"ACCRUAL_SYSTEM_ADDRESS"`
 	LogLevel             string        `env:"LOG_LEVEL" envDefault:"DEBUG"`
@@ -21,32 +21,20 @@ type Config struct {
 
 // GetConfig обрабатывает аргументы командной строки и переменные окружения,
 // возвращает заполненную конфигурацию.
-// Переменные окружения имеют приоритет над флагами.
+// Приоритет: переменные окружения > флаги командной строки > значения по умолчанию.
 func GetConfig() *Config {
 	var cfg Config
-	var flagRunAddress, flagDatabaseURI, flagAccrualAddress string
 
-	// Парсим переменные окружения
+	// Определяем флаги командной строки с дефолтами
+	flag.StringVar(&cfg.RunAddress, "a", "localhost:8080", "адрес запуска HTTP-сервера")
+	flag.StringVar(&cfg.DatabaseURI, "d", "", "строка подключения к базе данных")
+	flag.StringVar(&cfg.AccrualSystemAddress, "r", "", "адрес системы расчёта начислений")
+	flag.Parse()
+
+	// Парсим переменные окружения (перекроют флаги, если заданы)
 	err := env.Parse(&cfg)
 	if err != nil {
 		log.Fatal(err)
-	}
-
-	// Определяем флаги командной строки
-	flag.StringVar(&flagRunAddress, "a", "localhost:8080", "адрес запуска HTTP-сервера")
-	flag.StringVar(&flagDatabaseURI, "d", "", "строка подключения к базе данных")
-	flag.StringVar(&flagAccrualAddress, "r", "", "адрес системы расчёта начислений")
-	flag.Parse()
-
-	// Применяем флаги, если переменные окружения не заданы
-	if cfg.RunAddress == "" {
-		cfg.RunAddress = flagRunAddress
-	}
-	if cfg.DatabaseURI == "" {
-		cfg.DatabaseURI = flagDatabaseURI
-	}
-	if cfg.AccrualSystemAddress == "" {
-		cfg.AccrualSystemAddress = flagAccrualAddress
 	}
 
 	return &cfg
